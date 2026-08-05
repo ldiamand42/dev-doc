@@ -13,7 +13,7 @@ next:
 
 # SceneGraph, Performance & Memory - A Rough Guide
 
-SceneGraph is built around a tree of _nodes_ which are then rendered onto the display. BrightScript can
+Roku SceneGraph is built around a tree of _nodes_ which are then rendered onto the display. BrightScript can
 manipulate these nodes. The built-in node classes can be extended by developers by defining
 _component classes_.
 
@@ -48,15 +48,15 @@ classDiagram
 
 ### Thread Ownership
 
-The `threadId` is used to track "ownership" - which thread (task/SDK1 or render thread) "owns" this
-node. If a non-render thread accesses a node owned by the render thread, it will _rendezvous_ the
-operation. It is never possible for the render thread to encounter a node it does not own - the
+Each node has a private field `threadId`, used to track "ownership" - which thread (task/SDK1 or render thread) "owns" this
+node. If a non-render thread wants to access a node owned by the render thread, it will _rendezvous_ with render thread 
+for the operation. It is never possible for the render thread to encounter a node it does not own - the
 APIs _transfer_ the ownership recursively over to the render thread first.
 
-This is the mechanism that ensures a task thread cannot access a node concurrently with the render
-thread - after a task thread passes a node over to the render thread its ownership changes and
-thereafter all operations by the task thread are rendezvoused over to the render thread - the task thread
-blocks while the render thread performs the operation on its behalf (get/set/callfunc, etc).
+This is the mechanism that ensures that two threads cannot access the same node concurrently. 
+After a task thread passes a node over to the render thread, node's ownership changes and
+thereafter all operations on it (get/set/callfunc, etc) by the task thread are rendezvous-ed with the render thread - the task thread
+blocks waiting on the render thread to perform the operation on its behalf and resumes only after it is complete.
 
 ## SceneGraph Components
 
@@ -71,17 +71,17 @@ This creates an internal `CompiledComponent` object which records:
 - The parent compiled component (e.g. when one compiled component extends another).
 - The list of field definitions.
 - The set of interface functions.
-- The set of functions used by this component (e.g. `init`), used for the namespacing support.
+- The set of private functions defined by this component (e.g. `init()`), used for the namespacing support.
 
-When a component node is created (`CreateObject("roSGNode", "MyContentNode")`), this results in the creation of:
+When a component node is created (`CreateObject("roSGNode", "MyContentNode")` or XML markup), this results in the creation of:
 
 - The base C++ node object (e.g. `ContentNode`).
 - A `Component` instance, which references the `CompiledComponent`. This is referenced by the node.
-- The individual fields, with values set to initial values defined in the `CompiledComponent`.
-- The Component `m` array (`m.foo = some_value`).
+- The individual fields defined in the `CompiledComponent`, with values set to initial values.
+- The Component's `m` array (`m.foo = some_value`).
 
-i.e. a "component" is a SceneGraph `Node` with an associated `Component` data structure
-which extends the derived-`Node`'s behavior (refcounting, ownership, etc).
+i.e. a "component" is a SceneGraph node with an associated `Component` data structure
+which extends the derived-node's behavior (refcounting, ownership, etc).
 The words "component", "node", and "component node" are often used interchangeably
 but as far as programming from BrightScript is concerned, all classes of "component"
 are actually "nodes" with extended user-defined fields and functions and have
@@ -109,32 +109,32 @@ classDiagram
     CompiledComponent: BrightScript function table
 ```
 
-Each CompiledComponent keeps a lookup table (hashmap) of functions - this is used for
+Each `CompiledComponent` keeps a lookup table (hashmap) of functions - this is used for
 the per-component function namespacing.
 
 💡 To minimize Component creation time, avoid deeply nested class hierarchies (`extends`),
-keep the number of fields to a minimum, avoid using default values, and keep the `init()`
+keep the number of fields to a minimum, do not specify default `value` unless needed, and keep the `init()`
 function(s) as short and fast as possible. This also reduces the memory overhead of the
 `CompiledComponent` (although this is not normally significant).
 
-### Defining Fields - XML or `addField` ?
+### Defining Fields - XML or `addField()` ?
 
-Field creation is faster when defined in the XML compared to ad-hoc creation via `node.addField()`.
+Field creation is faster when defined in the XML compared to ad-hoc creation via `node.addField()/addFields()/update()`.
 When fields are added via `addField`, each node must build its own per-node name-to-field
 dictionary. When fields are defined via the XML, this dictionary is shared across all components
 of the same type and built only once.
 
 Fields are looked-up in the name-to-field dictionary at each level in the component's class hierarchy, so deep class
-hierarchies will be slower than shallow ones.
+hierarchies may be slower due to multiple lookups needed.
 
 # BrightScript Runtime
 
 Each BrightScript thread owns a control structure that owns a
-BrightScript `domain`. When a BrightScript thread creates a BrightScript
-object (e.g. via `CreateObject()` or `box()`) it is added to this
-list with a refcount of `1`. When other references are created the
-refcount is incremented, and when the refcount drops to zero it is
-released.
+BrightScript data `domain` which is a list of BrightScript objects. When a thread creates a BrightScript 
+object (e.g. via `CreateObject()` or `box()`), it is added to this
+list with a refcount of `1`. When other references to the same object are created, the
+refcount is incremented - and when the refcount drops to zero, the object it is 
+released (or "garbage collected"; any other objects it may referred to have their refcounts decreased and its memory is freed).
 
 ```
 foo = box("foo")    ' roString with refcount 1
@@ -147,8 +147,8 @@ Note: the terms "BrightScript component" and "BrightScript object" are used
 interchangeably.
 
 A channel starts with a single BrightScript thread which runs the `main()`
-subroutine. Creating a scene implicitly creates the render thread.
-[Task threads](doc:task) create additional BrightScript threads.
+subroutine. Creating a `Scene` implicitly creates the render thread. 
+Starting a `Task` thread creates an additional BrightScript thread, with its own _domain_.
 
 Threads can communicate with the render thread using a [Rendezvous](#Rendezvous),
 [MessagePorts](#MessagePort) or the [roRenderThreadQueue](#RenderThreadQueue).
@@ -158,8 +158,8 @@ Threads can communicate with the render thread using a [Rendezvous](#Rendezvous)
 See [roSGNode](doc:rosgnode)
 
 BrightScript's `roSGNode` class is used to manage SceneGraph `Node` instances.
-Each `roSGNode` instance has a `std::shared_ptr` which references that node. These
-`roSGNode` instances of course also have their own _separate_ BrightScript refcount. Multiple
+Each `roSGNode` instance has a `std::shared_ptr` which references an instance of a SceneGraph node. These
+`roSGNode` instances of course also have their own BrightScript refcounts, which are _separate_ from the refcount of the linked SceneGraph node. Multiple
 `roSGNode` instances can reference the same `Node` instance.
 
 For an XML file like this:
@@ -171,10 +171,10 @@ For an XML file like this:
 Created like this:
 
 ```
-n = CreateObject("roSGNode", "MyContentNode")
+myNodeVar = CreateObject("roSGNode", "MyContentNode")
 ```
 
-The `Node` instance will have a refcount of 1, as will the BrightScript `roSGNode` instance.
+The SceneGraph `Node` instance will have a refcount of 1, as will the BrightScript `roSGNode` instance.
 
 ```mermaid
 ---
@@ -204,14 +204,15 @@ If that BrightScript variable is assigned to another variable, this increments
 the refcount on the _BrightScript_ object, but not the underlying SceneGraph node:
 
 ```
-m = n      ' roSGNode BrightScript object's refcount is now 2
+myNodeVar2 = myNodeVar      ' BrightScript object roSGNode's refcount is now 2
 ```
 
 The SceneGraph node's refcount will be incremented if some other SceneGraph object
 references it, or if the `roSGNode` is cloned, for example:
 
 ```
-m.top.addChild(n)      ' SceneGraph Node refcount is now 2
+m.top.addChild(myNodeVar)      ' SceneGraph Node refcount is now 2
+myNodeVar2 = myNodeVar.clone() ' SceneGraph Node refcount is now 3
 ```
 
 Note that when using the `/query/sgnodes` ECP command, the `osref` count that is reported
@@ -220,9 +221,7 @@ referencing `roSGNode` instance.
 
 ## Passing values between BrightScript and SceneGraph
 
-When values are passed from a BrightScript object to a SceneGraph node (via an `roSGNode` object)
-using either "dot" notation or explicit `set` or `get` operations, the data is _copied_ to or from
-the field.
+When values are passed from a BrightScript code to a SceneGraph node (via an `roSGNode` object, using either "dot" notation or explicit `setField()` or `getField()` operations), the data is _copied_ to or from the field.
 
 ```mermaid
 flowchart RL
@@ -241,8 +240,8 @@ flowchart RL
     end
 
     %% Explicit ordering constraint: BS_Obj precedes the subgraph.
-    BS_Obj -- "set\nCopy AA\nRendezvous" --> SG_Node
-    SG_Node -- "get\nCopy AA\nRendezvous" --> BS_Obj
+    BS_Obj -- "setField()\nCopy AA\nRendezvous*" --> SG_Node
+    SG_Node -- "getField()\nCopy AA\nRendezvous*" --> BS_Obj
 
     classDef bsObject stroke:#818cf8,fill:#eef2ff
     classDef sgNode stroke:#2dd4bf,fill:#f0fdfa
@@ -257,13 +256,12 @@ flowchart RL
     class SG_Group group
 ```
 
-Just like `set` and `get`, `callfunc` *also* copies its arguments and result, and *also* does a
-rendezvous if ownership does not match.
+Just like `setField()` and `getField()`, `callFunc()` *also* copies its arguments and result, and *also* does a
+rendezvous if thread ownership does not match.
 
 ## Copying `roSGNode`
 
-An `roSGNode` can be copied from a task thread to the render thread. When this happens
-the data is _not_ copied - only the `roSGNode` "shell" object is copied - this is fast.
+An `roSGNode` may be copied from a task thread to the render thread - for example when assigned to a `field` of type `node` or as part of the content of `array`/`assocarray` field. When this happens, the linked SceneGraph node is _not_ copied - only the `roSGNode` "shell" object is copied - this is fast.
 
 There is a small amount of overhead for setting the new owning thread-id, but this is
 tiny (sub-microsecond per node).
@@ -275,25 +273,21 @@ See:
 - [data scoping](doc:data-scoping)
 - [Component global associative array](doc:threads#component-global-associative-array)
 
-The component owns a pair of BrightScript associative arrays which correspond to the `m` special
+Each XML component owns a pair of BrightScript associative arrays which correspond to the `m` special
 variable in component code, the component-scope `m`.
 
+One side of this pair is used by scripts executing on the node owner's thread. In the case of a `Task`, the owner is always the render thread, so 
 ```
 sub init()
     m.foo = 42    ' stored in render-thread half of "m"
 end sub
 ```
 
-One side of this pair is used by the render thread, and the other side is used
-when the component's code executes on a task thread (and is empty otherwise).
+The 2nd `m` is only used when component's code executes on a `Task` thread. When a task thread starts, first the render thread's `m` gets transferred to the new thread and the render thread instead retains a deep-clone of that. The "two `m`" split avoids contention for the same `m` between the task thread and render thread when executing in parallel on the same component. 
 
-When a task thread starts up, it will deep-clone the values in the render-thread's side across to the
-task thread's side during the first rendezvous.
+💡 Note that since not all data types are cloneable, the render thread retains is an _imperfect_ copy of `m` after starting the first new thread. Therefore it is not a good idea to start a thread more than once per `Task` instance. 
 
-💡 This can have a performance impact for large amounts of data in `m`.
-💡 It is better to have a small number of long-lived task threads rather than spawning new ones
-per-request - thread startup requires at least one rendezvous and so can easily take tens of
-milliseconds, and block the render thread.
+💡 Since thread startup can block the render thread for tens of milliseconds, it is better to have a long-lived task thread handling multiple requests - rather than spawning new `Task` instance or new thread on per-request basis. 
 
 ## Common Performance Problems Copying In/Out of Node Fields
 
@@ -305,10 +299,8 @@ especially easy to do when mixing accesses to `m` and `m.top`.
 
 - `m` is a normal BrightScript associative array, so accesses are fast. The data references do still need to
     be managed to ensure memory is recycled when no longer needed.
-- `m.top` is a SceneGraph node. Accesses result in a **copy** of the field's data to construct a new
-BrightScript associative array. Releasing it (when its refcount drops to zero) will take time.
-- `m.global` is also a SceneGraph node, so the same performance penalties apply - accessing its fields
-will copy the data in or out.
+- `m.top` is (a `roSgNode` pointing to) a SceneGraph node. Access to a field of `m.top` results in a **copy** of the field's data. Which in the case of `array`/`assocarray` field means to construct a new `Array`/`roAssociativeArray` which typically have to released after evaluation of the current expression is done - but this is taxing with complex structures. 
+- `m.global` also points to a SceneGraph node, so the same performance penalties apply - accessing its fields will copy the data in or out.
 
 Consider the following code:
 
@@ -330,15 +322,15 @@ m.data = data
 ' Copies the data into the field - slow for large data
 m.top.data = data
 
-' Reads the whole of data *twice*, not just "state", and discards it *twice*
+' Next line reads the whole field data *twice* (not just "state"!) and discards it *twice*
 if m.top.data.state <> invalid and m.top.data.state.some_value = 42 then
    do_thing(m.top.data.state)    ' and reads + releases it again!
 
    ' Try to modify "some_value"
-   m.top.data.state.some_value = 43   ' Oops, only updates copy - mutation lost!
+   m.top.data.state.some_value = 43   ' Oops, only updates the BrightScript copy - the m.top.data was not updated!
 
    data.state.some_value = 44
-   m.top.data = data   ' Success - updates entire field.
+   m.top.data = data   ' Success - updating the entire field works
 end if
 
 data = invalid         ' Decrements refcount, still one more reference
@@ -354,7 +346,7 @@ m.top.data = invalid   ' Field data released (takes time)
 | `m.top.data = data`             | Copy entire data into node field                             | `O(N)`      |
 | `m.top.data.state`              | Copy entire data OUT of node → temp AA, read .state          | `O(N)`      |
 | `m.top.data.state.some_value=43`| Copy entire data OUT → temp AA, mutate temp. Node unchanged  | `O(N)`, wasted |
-| `m.data = invalid`              | Decrement refcount, release if zero                          | `O(N)`      |
+| `m.data = invalid`              | Decrement refcount, release if zero                          | `O(N)` on release |
 | `m.top.data = invalid`          | Release field contents                                       | `O(N)`      |
 
 ### Copying - Analyzing in Perfetto
@@ -369,7 +361,7 @@ A Perfetto trace of this looks like this (some of the event names are truncated)
 object release, which takes time.
 - The `bscDeleteStandaloneDomain` entry is where the old field value is replaced with the new.
 
-See also the discussion in [Referencing subsections of m.global](doc:data-management#referencing-subsections-of-mglobal).
+See also the discussion in [Referencing subsections of `m.global`](doc:data-management#referencing-subsections-of-mglobal).
 
 ## SceneGraph `assocarray` and `array` Field Performance
 
@@ -393,8 +385,8 @@ It uses the same algorithm used for `array` fields - even if an associative arra
 It may be possible to reduce or eliminate the copies required when transferring data to/from
 a node by using `moveIntoField()`, `moveFromField()`, `getRef()` and `setRef()`.
 
-`moveIntoField()` can be used to avoid copying data. However, the moving algorithm will
-avoid moving data that is externally referenced. This means that if you know that your
+`moveIntoField()` can be used to avoid copying data. However, it cannot move those parts of 
+the data that are externally referenced and instead will copy them. This means that if you know that your
 data is externally referenced it may well be faster to simply copy it, since this avoids
 the overhead of the external-referencing check.
 
@@ -431,9 +423,9 @@ flowchart LR
     cycle --> foo
 ```
 
-This can be detected at run time with `RunGarbageCollector()` which will walk the objects
-in the domain (thread) that it is invoked on and find those that have outstanding
-refcounts. Cycles can also be detected with Perfetto where they will be reported as unreachable
+This can be detected with manual call to `RunGarbageCollector()` which will walk the BrightScript objects
+in the data domain of the thread it is invoked on, find the orphans kept alive by cyclic references and 
+free them. Cycles can also be detected with Perfetto where they will be reported as unreachable
 objects.
 
 `RunGarbageCollector()` should not normally be used in production - its execution time is linear
@@ -442,8 +434,9 @@ objects.
 See also [Garbage Collector](doc:data-management#garbage-collector) and
 [Circular Dependencies in SceneGraph](doc:data-management#circular-dependencies-in-scenegraph).
 
-## Cycles in SceneGraph Trees - Child-to-Parent
+## Cycles in SceneGraph 
 
+Cycles based on the parent-child relations in the SceneGraph tree are impossible. 
 When child nodes are added, SceneGraph checks that the child being added is not already
 a parent (recursively up the node tree). This means that building a tree of nodes is
 quadratic in the depth (`O(N^2)`). In practice this overhead is small - on a typical device
@@ -451,8 +444,9 @@ constructing a tree of depth 10 is a few tens of microseconds per node. The cycl
 detection does not visit sibling nodes (it is done merely to ensure that the tree
 can always be traversed upwards without looping).
 
-Cycles between nodes due to (e.g.) node field references are only broken when the channel is
-closed. This can also defeat the reference counting and cause a memory leak.
+Cycles however are possible due to `node` field references (consider the simplest case of `nodeA.someField = nodeA`). 
+This can also defeat the reference counting and cause a memory leak. Such cycles only broken automatically 
+when the channel is closed. 
 
 ## Cycles Between BrightScript and SceneGraph
 
@@ -474,16 +468,16 @@ alive by the reference in the component `m`. This can also happen with more comp
 A Perfetto heapgraph can reveal these cycles - it records the edges between all nodes.
 
 
-## Cycles, Array Fields, and CallFunc()
+## Cycles, Array Fields, and CallFunc() - oh my!
 
-A long-standing bug means that if an `array` field has a cycle then the memory will be leaked even if the field itself
+Due to a long-standing bug if the content of an `array` field has a cycle then the memory will be leaked even if the field itself
 is destroyed. This is not true of `assocarray` fields - for these, a cyclic field structure is cleaned up when the
 field is reassigned or destroyed.
 
 These `array` field leaks are not detectable with `RunGarbageCollector()`. The cycles can be viewed
 in Perfetto, but any already-leaked cycles from this effect are not visible.
 
-The same problem also exists in `CallFunc()` - if the parameters or return value contain a cycle then this
+The same problem also exists in `CallFunc()` - if the arguments or return value contain a cycle then memory 
 will be irrecoverably leaked on each invocation.
 
 # Node Tree Operations
@@ -493,7 +487,7 @@ will be irrecoverably leaked on each invocation.
 `roSGNode.findNode()` searches in two steps: first it looks up the id in a dictionary built from
 all of the nodes constructed in the XML. This search is `O(logN)` in the number of nodes.
 If the object is not found there, it then searches using a breadth-first search, which is
-`O(N)` in the number of nodes in that subtree.
+`O(N)` in the number of nodes in the XML component subtree.
 
 💡 This search can become slow if used repeatedly on large trees of nodes.
 
@@ -511,7 +505,7 @@ node could have quite a big impact.
 ## Rendezvous
 
 A [rendezvous](doc:threads#thread-rendezvous) is the mechanism used to synchronize between
-task threads (and the SDK1 `main` thread) and the render thread.
+task threads (and the SDK1 `main()` thread) and the render thread.
 
 The task thread blocks waiting for the render thread to respond. Additionally, any SceneGraph objects
 that are involved in the rendezvous become "owned" by the render thread. Thereafter all accesses
@@ -521,11 +515,11 @@ to that object and its child nodes by the task thread require a rendezvous.
 ' Task.brs
 
 sub runTask()
-    n = CreateObject("roSGNode", "MyContentNode")    ' owned by task here
-    n.my_field = "hello"             ' still owned by task, no blocking
+    n = CreateObject("roSGNode", "MyContentNode")    ' owned by task thread here
+    n.my_field = "hello"             ' still owned by task thread, no blocking
     m.top.some_field = n             ' rendezvous - m.top is already owned by render thread
-                                     ' "n" is now owned by the render thread
-    ? n.my_field                     ' rendezvous - "n" now owned by render thread
+                                     ' render thread takes ownership of `n`
+    ? n.my_field                     ' rendezvous, since `n` now owned by another thread
 end sub
 ```
 
@@ -536,7 +530,7 @@ test takes place, and where the blocking takes place.
 
 An ordinary BrightScript array or AA does _not_ rendezvous.
 
-Because a rendezvous occurs on each access, and the accesses are not easily
+Because a rendezvous occurs on each cross-thread-ownership access, and the accesses are not easily
 visible in the syntax of your code, it can be easy to introduce performance
 problems without realising.
 
@@ -560,7 +554,7 @@ sub init()
 end sub
 
 sub runTask()
-    ' Two rendezvous; m.top and my_node
+    ' Two rendezvous; getting `aafield` field from `m.top` and getting `title` field from `my_node`
     print m.top.aafield.my_node.title
 end sub
 ```
@@ -568,8 +562,8 @@ end sub
 ### Rendezvous Following Ownership Transfer
 
 
-if the code inadvertently accesses a field after a
-rendezvous has transferred over the ownership. This is an easy mistake to make as
+The code inadvertently accessing a field after a
+rendezvous has transferred over the ownership - this is an easy mistake to make as
 it is not obvious from the code syntax that there is a performance problem. Consider
 the following code - two identical statements that take very different amounts of time
 following a rendezvous:
@@ -577,7 +571,7 @@ following a rendezvous:
 ```
 ' MyTask.brs
 sub RunTask()
-    data = get_my_content_node() ' Get a content node from somewhere
+    data = get_my_content_node() ' Get a ContentNode locally 
     do_thing(data.foo)           ' No problem, not a rendezvous, only cost is copying "foo"
 
     ' Rendezvous to render thread
@@ -590,12 +584,12 @@ sub RunTask()
 end sub
 ```
 
-The example above uses `m.top` which is always owned by the render thread, but it applies
+The example above uses `m.top` which is _most_ always owned by the render thread, but it applies
 to _any_ object owned by the render thread.
 
 ### Rendezvous Overhead
 
-A single rendezvous costs in the order of 100us-200us on typical hardware (ignoring the cost of copying any field data).
+On average, a single rendezvous costs in the order of 100us-200us on typical hardware (ignoring the cost of copying any field data).
 
 ### Diagnosing Rendezvous Problems
 
@@ -639,16 +633,16 @@ and observed objects.
 - `node.observeFieldScopedEx()` - stores the observer in the observing object, or in `m.global`
 if being called from the SDK1/`main` thread.
 
-If the _observed_ object is being created and destroyed, then using `observeField()` will
+If the _observed_ object is short-lived, then using `observeField()` will
 ensure that the observer is automatically cleaned up when that observed object is
 destroyed.
 
-Similarly, if the _observing_ object is being created and destroyed then
+Similarly, if the _observing_ object is short-lived then
 `observeFieldScopedEx()` is a better choice - otherwise the observed object will
 have a dangling observer when the observer goes away, wasting memory and CPU cycles.
 
 Do not use `observeFieldScoped()` - it is retained for backward compatibility but does not
-work properly, and stores the observer on the _observed_ field, like `observeField()`.
+work properly (it stores the observer on the _observed_ field, like `observeField()`).
 
 See [ifSGNodeField](doc:ifsgnodefield).
 
@@ -656,15 +650,18 @@ See [ifSGNodeField](doc:ifsgnodefield).
 
 See [roMessagePort](doc:romessageport)
 
-This will copy its data from the source field which could be a problem for large amounts of
-data. If the data contains any SceneGraph nodes then the receiving task thread
-could end up rendezvousing on every access to them since they will be owned by the
+Observing a field to a message port copies event data from the source field, which could be a problem for large amounts of
+data. On the other hand, this preserves in the message queue a faithful copy of state over time, which may be crucial when 
+working with a state machine like `Video`. 
+
+If the data contains any SceneGraph nodes then a receiving task thread
+would end up rendezvous-ing on every access to them since they will be owned by the
 render thread.
 
 ## `roRenderThreadQueue`
 
-This can be used by task threads and the SDK1/`main` thread to avoid blocking in
-a rendezvous. It is useful for long-lived tasks that must periodically signal
+This can be used by task threads and the SDK1/`main` thread to avoid blocking for 
+a rendezvous when sending data. It is useful for long-lived tasks that must periodically signal
 the render thread and can do additional useful work if they are not blocked.
 
 See [roRenderThreadQueue](doc:rorenderthreadqueue) and [Data Transfer APIs](doc:data-transfer-apis).
@@ -673,9 +670,9 @@ See [roRenderThreadQueue](doc:rorenderthreadqueue) and [Data Transfer APIs](doc:
 
 ## Channel Store Compilation
 
-BrightScript channels are compiled off-line in the Channel Store before being
-delivered to devices. This cuts down on startup time (seconds for a large
-channel), and also reduces memory requirements. DCLs stored in the channel itself
+BrightScript channels are automatically compiled by the Channel Store as part of the publishing process and the app bundle 
+is most always delivered to devices in a compiled form. This cuts down on startup time (seconds for a large 
+channel), and also reduces memory requirements. DCLs stored in the channel itself (e.g. `pkg:/componentLibraries/myLib.zip`)
 are also compiled in the same way.
 
 This does _not_ happen for DCLs loaded from an external URL since the Channel Store does
@@ -696,9 +693,9 @@ This is described in more detail in [Perfetto](doc:app-tracing).
 
 # Performance Tips
 
-💡 Less is more - don't pass more data around than you need to - it will make your channel slower and use
-more memory. If you can reduce the amount of JSON data sent by your server endpoints this can be an easy
-way to improve both performance and memory use.
+💡 _Less is more_ - don't pass more data around than you need to - it will make your channel slower and use
+more memory. If you can reduce the amount of JSON data sent by your server endpoints (e.g. paging or subset-select instead of big-bang) 
+this can be an easy way to improve both performance and memory use.
 
 💡 Try to read field values just once into a local variable rather than repeatedly copying from the same
 field.
@@ -709,7 +706,7 @@ access but they still use memory.
 💡 Try to break up data structures - putting everything into a single field is convenient but can
 result in unavoidable copying costs.
 
-💡 Watch out for accesses to a node in a task thread after it has been rendezvoused across to the render
+💡 Watch out for accesses to a node in a task thread after it has been rendezvous-ed across to the render
 thread - each access to that node and its children will now require a rendezvous.
 
 💡 Use Perfetto to find large or repeated copies, and repeated rendezvous operations.
